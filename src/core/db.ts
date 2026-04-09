@@ -62,29 +62,14 @@ export async function disconnect(): Promise<void> {
 export async function initSchema(): Promise<void> {
   const conn = getConnection();
 
-  // Read schema SQL
+  // Read schema SQL and execute as a single statement.
+  // The postgres driver handles multi-statement SQL natively, including
+  // PL/pgSQL functions with $$ delimiter blocks that contain semicolons.
+  // The schema uses IF NOT EXISTS / CREATE OR REPLACE for idempotency.
   const schemaPath = join(dirname(new URL(import.meta.url).pathname), '..', 'schema.sql');
   const schemaSql = readFileSync(schemaPath, 'utf-8');
 
-  // Split on semicolons and execute each statement
-  // (postgres driver can handle multi-statement, but explicit is safer)
-  const statements = schemaSql
-    .split(/;\s*$/m)
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'));
-
-  for (const stmt of statements) {
-    try {
-      await conn.unsafe(stmt);
-    } catch (e: unknown) {
-      // Ignore "already exists" errors for idempotency
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes('already exists') || msg.includes('duplicate key')) {
-        continue;
-      }
-      throw e;
-    }
-  }
+  await conn.unsafe(schemaSql);
 }
 
 export async function withTransaction<T>(fn: () => Promise<T>): Promise<T> {
