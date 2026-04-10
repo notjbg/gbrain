@@ -55,6 +55,18 @@ E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_U
 - Always run E2E tests when they exist. Do not skip them just because DATABASE_URL
   is not set. Start the test DB, run the tests, then tear it down.
 
+### API keys for Tier 2 tests
+
+Before running tests that require API keys (OpenAI, Anthropic), source the user's
+shell profile to load environment variables:
+
+```bash
+source ~/.zshrc 2>/dev/null || true
+```
+
+This loads `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` from the user's shell config.
+Without these, Tier 2 E2E tests (`skills.test.ts`) and embedding tests will skip.
+
 ### E2E test DB lifecycle (ALWAYS follow this)
 
 You are responsible for spinning up and tearing down the test Postgres container.
