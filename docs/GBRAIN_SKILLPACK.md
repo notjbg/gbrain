@@ -490,8 +490,8 @@ spawning for heavy work.
 
 ### The Dream Cycle (DREAMS.md)
 
-The most important cron job runs while you sleep. OpenClaw ships with DREAMS.md as a
-default skill. When quiet hours start, the dream cycle kicks off:
+The most important cron job runs while you sleep. OpenClaw/Hermes ships with DREAMS.md
+as a default skill. When quiet hours start, the dream cycle kicks off:
 
 1. **Entity sweep.** Scan today's conversations for every person, company, concept, or
    idea you mentioned. Check each against the brain.

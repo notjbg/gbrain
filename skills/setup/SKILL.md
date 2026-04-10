@@ -64,7 +64,7 @@ Guide the user through creating a Supabase project:
    ```
 6. Verify: `gbrain doctor --json`
 
-**OpenClaw agent instructions:** Store the Supabase access token in your persistent
+**OpenClaw/Hermes agent instructions:** Store the Supabase access token in your persistent
 env as `SUPABASE_ACCESS_TOKEN`. gbrain doesn't store it, you need it for future
 `gbrain doctor` runs. Generate at: https://supabase.com/dashboard/account/tokens
 
@@ -212,7 +212,7 @@ output. It checks connection, pgvector, RLS, schema version, and embeddings.
 ## Phase G: Auto-Update Check (if not already configured)
 
 If the user's install did NOT include setting up auto-update checks (e.g., they
-used the manual install path or an older version of the OpenClaw paste), offer it:
+used the manual install path or an older version of the OpenClaw/Hermes paste), offer it:
 
 > "Would you like daily GBrain update checks? I'll let you know when there's a
 > new version worth upgrading to — including new skills and schema recommendations.

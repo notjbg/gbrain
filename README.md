@@ -101,7 +101,7 @@ The numbers above aren't theoretical. They come from a real deployment documente
 
 Without the skillpack, your agent has tools but no playbook. With it, the agent knows when to read, when to write, how to enrich, and how to keep the brain alive autonomously. It's a pattern book, not a tutorial. "Here's what works, here's why."
 
-## How gbrain fits with OpenClaw
+## How gbrain fits with OpenClaw/Hermes
 
 GBrain is world knowledge — people, companies, deals, meetings, concepts, your original thinking. It's the long-term memory of what you know about the world.
 
@@ -190,9 +190,9 @@ The Supabase connection URL is configured during `gbrain init`. The OpenAI and A
 
 Without an OpenAI key, search still works (keyword only, no vector search). Without an Anthropic key, search still works (no multi-query expansion, no LLM chunking).
 
-### With OpenClaw (recommended)
+### With OpenClaw or Hermes Agent (recommended)
 
-To install, paste this into OpenClaw and we'll work with you to do the rest:
+To install, paste this into [OpenClaw](https://openclaw.com) or [Hermes Agent](https://hermesagent.com) and we'll work with you to do the rest:
 
 ```
 Set up gbrain (https://github.com/garrytan/gbrain) as my
