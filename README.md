@@ -328,12 +328,13 @@ EMBEDDINGS
 LINKS + GRAPH
   gbrain link|unlink|backlinks|graph    Cross-reference management
 
-JOBS (Minions v7)
+JOBS (Minions)
   gbrain jobs submit <name> [--params JSON] [--follow]  Submit a background job
   gbrain jobs list [--status S] [--queue Q]             List jobs with filters
   gbrain jobs get|cancel|retry|delete <id>              Manage job lifecycle
   gbrain jobs prune [--older-than 30d]                  Clean completed/dead jobs
   gbrain jobs stats                                     Job health dashboard
+  gbrain jobs smoke                                     One-command health check
   gbrain jobs work [--queue Q] [--concurrency N]        Start worker daemon
 
 ADMIN

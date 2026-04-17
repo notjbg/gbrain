@@ -66,6 +66,7 @@ USAGE
   gbrain jobs prune [--older-than 30d]
   gbrain jobs delete <id>
   gbrain jobs stats
+  gbrain jobs smoke
   gbrain jobs work [--queue Q] [--concurrency N]
 `);
     return;
@@ -283,6 +284,49 @@ USAGE
         console.log('  No jobs in the last 24 hours.');
       }
       console.log(`\n  Queue health: ${stats.queue_health.waiting} waiting, ${stats.queue_health.active} active, ${stats.queue_health.stalled} stalled`);
+      break;
+    }
+
+    case 'smoke': {
+      const startTime = Date.now();
+      try { await queue.ensureSchema(); }
+      catch (e) {
+        console.error(`SMOKE FAIL — schema init: ${e instanceof Error ? e.message : String(e)}`);
+        process.exit(1);
+      }
+
+      const worker = new MinionWorker(engine, { queue: 'smoke', pollInterval: 100 });
+      worker.register('noop', async () => ({ ok: true, at: new Date().toISOString() }));
+
+      const job = await queue.add('noop', {}, { queue: 'smoke', max_attempts: 1 });
+      const workerPromise = worker.start();
+
+      const timeoutMs = 15000;
+      let final: MinionJob | null = null;
+      for (let elapsed = 0; elapsed < timeoutMs; elapsed += 100) {
+        await new Promise(r => setTimeout(r, 100));
+        final = await queue.getJob(job.id);
+        if (final && ['completed', 'failed', 'dead', 'cancelled'].includes(final.status)) break;
+      }
+      worker.stop();
+      await workerPromise;
+
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(2);
+      if (final?.status === 'completed') {
+        const cfg = (await import('../core/config.ts')).loadConfig();
+        const engineLabel = cfg?.engine ?? 'unknown';
+        console.log(`SMOKE PASS — Minions healthy in ${elapsedSec}s (engine: ${engineLabel})`);
+        if (engineLabel === 'pglite') {
+          console.log('Note: the `gbrain jobs work` daemon requires Postgres. PGLite');
+          console.log('supports inline execution only (`submit --follow`).');
+        }
+        try { await queue.removeJob(job.id); } catch { /* non-fatal cleanup */ }
+        process.exit(0);
+      } else {
+        console.error(`SMOKE FAIL — job #${job.id} status: ${final?.status ?? 'timeout'} (${elapsedSec}s elapsed)`);
+        if (final?.error_text) console.error(`  Error: ${final.error_text}`);
+        process.exit(1);
+      }
       break;
     }
 

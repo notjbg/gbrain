@@ -4,7 +4,7 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.11.0] - 2026-04-18
 
-### Added — Minions v7 (agent orchestration primitives)
+### Added — Minions (agent orchestration primitives)
 
 Minions was a job queue. Now it's an agent runtime. Everything your orchestrator needs to fan out work across sub-agents without turning them into orphans or rate-limit disasters.
 

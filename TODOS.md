@@ -63,7 +63,7 @@
 ### ~~Constrained health_check DSL for third-party recipes~~
 **Completed:** v0.9.3 (2026-04-12). Typed DSL with 4 check types (`http`, `env_exists`, `command`, `any_of`). All 7 first-party recipes migrated. String health checks accepted with deprecation warning + metachar validation for non-embedded recipes.
 
-## P1 (new from v0.11.0 — Minions v7)
+## P1 (new from v0.11.0 — Minions)
 
 ### Per-queue rate limiting for Minions
 **What:** Token-bucket rate limiting per queue via a new `minion_rate_limits` table (queue, capacity, refill_rate, tokens, updated_at), with acquire/release in `claim()`.
@@ -76,7 +76,7 @@
 
 **Effort:** ~2 hours. Deferred from v0.11.0 to keep the parity PR at a reviewable size.
 
-**Depends on:** Minions v7 (shipped).
+**Depends on:** Minions (shipped in v0.11.0).
 
 ### Minions repeat/cron scheduler
 **What:** BullMQ-style repeatable jobs. `queue.add(name, data, { repeat: { cron: '0 * * * *' } })`.
