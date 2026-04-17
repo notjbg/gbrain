@@ -480,8 +480,6 @@ LINKS
   graph <slug> [--depth N]           Traverse link graph (returns nodes)
   graph-query <slug> [--type T]      Edge-based traversal with type/direction filters
         [--depth N] [--direction in|out|both]
-  link-extract [--dry-run] [--type T] [--since DATE]
-                                     Batch extract links from page content (idempotent)
 
 TAGS
   tags <slug>                        List tags
@@ -491,11 +489,13 @@ TAGS
 TIMELINE
   timeline [<slug>]                  View timeline
   timeline-add <slug> <date> <text>  Add timeline entry
-  timeline-extract [--dry-run] [--type T] [--since DATE]
-                                     Batch extract structured timeline entries (idempotent)
 
 TOOLS
-  extract <links|timeline|all> [dir] Extract links/timeline from markdown into DB
+  extract <links|timeline|all>       Extract links/timeline (idempotent)
+        [--source fs|db]             fs (default) walks .md files; db iterates engine pages
+        [--dir <brain>]              brain dir for fs source
+        [--type T] [--since DATE]    filters (db source)
+        [--dry-run] [--json]
   publish <page.md> [--password]     Shareable HTML (strips private data, optional AES-256)
   check-backlinks <check|fix> [dir]  Find/fix missing back-links across brain
   lint <dir|file> [--fix]            Catch LLM artifacts, placeholder dates, bad frontmatter

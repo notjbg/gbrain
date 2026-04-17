@@ -84,7 +84,7 @@ to the graph (`links` table) with inferred relationship types. Stale links
   so the agent can verify outcomes.
 - To disable: `gbrain config set auto_link false`. Default is on.
 - Timeline entries with specific dates still need explicit `gbrain timeline-add`
-  (or batch via `gbrain timeline-extract`).
+  (or batch via `gbrain extract timeline --source db`).
 
 ### Phase 3: On Every Outbound Response (READ → PULL → RESPOND)
 
