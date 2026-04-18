@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult } from '../src/core/utils.ts';
+import { validateSlug, contentHash, parsePgVector, rowToPage, rowToChunk, rowToSearchResult } from '../src/core/utils.ts';
 
 describe('validateSlug', () => {
   test('accepts valid slugs', () => {
@@ -97,6 +97,61 @@ describe('rowToChunk', () => {
       model: 'test', token_count: 5, embedded_at: '2024-01-01',
     }, true);
     expect(chunk.embedding).not.toBeNull();
+  });
+
+  test('parses pgvector string representation into Float32Array', () => {
+    const chunk = rowToChunk({
+      id: 1, page_id: 1, chunk_index: 0, chunk_text: 'text',
+      chunk_source: 'compiled_truth', embedding: '[0.1,-0.2,0.3]',
+      model: 'test', token_count: 5, embedded_at: '2024-01-01',
+    }, true);
+    expect(chunk.embedding).toBeInstanceOf(Float32Array);
+    expect(chunk.embedding!.length).toBe(3);
+    expect(chunk.embedding![0]).toBeCloseTo(0.1);
+    expect(chunk.embedding![1]).toBeCloseTo(-0.2);
+    expect(chunk.embedding![2]).toBeCloseTo(0.3);
+  });
+});
+
+describe('parsePgVector', () => {
+  test('passes through Float32Array', () => {
+    const emb = new Float32Array([0.1, 0.2, 0.3]);
+    expect(parsePgVector(emb)).toBe(emb);
+  });
+
+  test('converts number array to Float32Array', () => {
+    const out = parsePgVector([0.1, 0.2, 0.3]);
+    expect(out).toBeInstanceOf(Float32Array);
+    expect(out!.length).toBe(3);
+    expect(out![0]).toBeCloseTo(0.1);
+  });
+
+  test('parses pgvector textual format', () => {
+    const out = parsePgVector('[0.5,-0.25,1.0]');
+    expect(out).toBeInstanceOf(Float32Array);
+    expect(Array.from(out!)).toEqual([0.5, -0.25, 1.0]);
+  });
+
+  test('parses bare comma-separated floats', () => {
+    const out = parsePgVector('0.5,-0.25,1.0');
+    expect(Array.from(out!)).toEqual([0.5, -0.25, 1.0]);
+  });
+
+  test('produces finite numbers (regression: cosine=NaN on hybrid re-score)', () => {
+    const out = parsePgVector('[0.1,0.2,0.3]')!;
+    for (let i = 0; i < out.length; i++) {
+      expect(Number.isFinite(out[i])).toBe(true);
+    }
+  });
+
+  test('returns null for nullish input', () => {
+    expect(parsePgVector(null)).toBeNull();
+    expect(parsePgVector(undefined)).toBeNull();
+  });
+
+  test('returns null for empty string', () => {
+    expect(parsePgVector('')).toBeNull();
+    expect(parsePgVector('[]')).toBeNull();
   });
 });
 

@@ -2,6 +2,34 @@ import { createHash } from 'crypto';
 import type { Page, PageInput, PageType, Chunk, SearchResult } from './types.ts';
 
 /**
+ * Parse a pgvector column from postgres.js into a Float32Array.
+ *
+ * postgres.js has no built-in parser for pgvector's custom type, so it returns
+ * the column as a textual representation like `"[0.1,-0.2,...]"`. A naive cast
+ * to Float32Array leaves a string in place, which silently produces NaN when
+ * indexed numerically (e.g. inside cosineSimilarity during hybrid search
+ * re-ranking).
+ */
+export function parsePgVector(raw: unknown): Float32Array | null {
+  if (raw == null) return null;
+  if (raw instanceof Float32Array) return raw;
+  if (Array.isArray(raw)) return new Float32Array(raw as number[]);
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const body = trimmed.startsWith('[') && trimmed.endsWith(']')
+      ? trimmed.slice(1, -1)
+      : trimmed;
+    if (!body) return null;
+    const parts = body.split(',');
+    const out = new Float32Array(parts.length);
+    for (let i = 0; i < parts.length; i++) out[i] = Number(parts[i]);
+    return out;
+  }
+  return null;
+}
+
+/**
  * Validate and normalize a slug. Slugs are lowercased repo-relative paths.
  * Rejects empty slugs, path traversal (..), and leading /.
  */
@@ -50,7 +78,7 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
     chunk_index: row.chunk_index as number,
     chunk_text: row.chunk_text as string,
     chunk_source: row.chunk_source as 'compiled_truth' | 'timeline',
-    embedding: includeEmbedding && row.embedding ? row.embedding as Float32Array : null,
+    embedding: includeEmbedding ? parsePgVector(row.embedding) : null,
     model: row.model as string,
     token_count: row.token_count as number | null,
     embedded_at: row.embedded_at ? new Date(row.embedded_at as string) : null,
