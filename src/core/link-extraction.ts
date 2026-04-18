@@ -39,17 +39,55 @@ export interface EntityRef {
 const ENTITY_REF_RE = /\[([^\]]+)\]\((?:\.\.\/)*((?:people|companies|meetings|concepts|deal|civic|project|source|media|yc)\/([^)\s]+?))(?:\.md)?\)/g;
 
 /**
+ * Strip fenced code blocks (```...```) and inline code (`...`) from markdown,
+ * replacing them with whitespace of equivalent length. Preserves byte offsets
+ * for any caller that cares about positions; for our extractors this is just
+ * defense-in-depth — slugs inside code are not real entity references.
+ */
+function stripCodeBlocks(content: string): string {
+  let out = '';
+  let i = 0;
+  while (i < content.length) {
+    // Fenced block: ``` (optional language) ... ```
+    if (content.startsWith('```', i)) {
+      const end = content.indexOf('```', i + 3);
+      if (end === -1) { out += ' '.repeat(content.length - i); break; }
+      out += ' '.repeat(end + 3 - i);
+      i = end + 3;
+      continue;
+    }
+    // Inline code: `...` (single backtick, no newline inside)
+    if (content[i] === '`') {
+      const end = content.indexOf('`', i + 1);
+      if (end === -1 || content.slice(i + 1, end).includes('\n')) {
+        out += content[i];
+        i++;
+        continue;
+      }
+      out += ' '.repeat(end + 1 - i);
+      i = end + 1;
+      continue;
+    }
+    out += content[i];
+    i++;
+  }
+  return out;
+}
+
+/**
  * Extract `[Name](path-to-people-or-company)` references from arbitrary content.
  * Both filesystem-relative paths (with `../` and `.md`) and bare engine-style
  * slugs (`people/slug`) are matched. Returns one EntityRef per match (no dedup
- * here; caller dedups).
+ * here; caller dedups). Slugs appearing inside fenced or inline code blocks
+ * are excluded — those are typically code samples, not real entity references.
  */
 export function extractEntityRefs(content: string): EntityRef[] {
+  const stripped = stripCodeBlocks(content);
   const refs: EntityRef[] = [];
   let m: RegExpExecArray | null;
   // Fresh regex per call (g-flag state is per-instance).
   const re = new RegExp(ENTITY_REF_RE.source, ENTITY_REF_RE.flags);
-  while ((m = re.exec(content)) !== null) {
+  while ((m = re.exec(stripped)) !== null) {
     const name = m[1];
     const fullPath = m[2];
     const slug = fullPath; // dir/slug
@@ -101,13 +139,15 @@ export function extractPageLinks(
 
   // 2. Bare slug references (e.g. "see people/alice-chen for context").
   // Limited to the same entity directories ENTITY_REF_RE covers.
+  // Code blocks are stripped first — slugs in code samples are not real refs.
+  const strippedContent = stripCodeBlocks(content);
   const bareRe = /\b((?:people|companies|meetings|concepts|deal|civic|project|source|media|yc)\/[a-z0-9][a-z0-9-]*)\b/g;
   let m: RegExpExecArray | null;
-  while ((m = bareRe.exec(content)) !== null) {
+  while ((m = bareRe.exec(strippedContent)) !== null) {
     // Skip matches that are part of a markdown link (already handled above).
-    const charBefore = m.index > 0 ? content[m.index - 1] : '';
+    const charBefore = m.index > 0 ? strippedContent[m.index - 1] : '';
     if (charBefore === '/' || charBefore === '(') continue;
-    const context = excerpt(content, m.index, 80);
+    const context = excerpt(strippedContent, m.index, 80);
     candidates.push({
       targetSlug: m[1],
       linkType: inferLinkType(pageType, context),
