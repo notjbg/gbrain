@@ -160,20 +160,106 @@ relational questions correctly. On a 30K-page brain with hundreds of incoming
 queries per day, that's the difference between a brain that responds quickly and one
 that scans like grep.
 
-### What this benchmark does NOT test (yet)
+## Multi-hop traversal (A vs C)
 
-- **Multi-hop traversal** ("who attended meetings with people who work at startup-0?").
-  A's fallback would need 2 sequential greps and manual stitching; C does it in one
-  recursive CTE. Adding multi-hop queries would show recall divergence (not just
-  precision), but isn't in the v0.10.3 query set.
-- **Search ranking with backlink boost.** This benchmark tests graph traversal, not
-  hybrid search. The existing [search-quality benchmark](2026-04-14-search-quality.md)
-  covers nDCG; future work could combine A/B/C across both.
-- **Aggregate queries** ("who is the most-connected person?"). C makes these trivial
-  via `getBacklinkCounts`. A would require reading every page.
-- **Type-disagreement queries** ("which advisors are also investors?"). C handles
-  these via two filtered traversals and set intersection. A can't do them without
-  inferring types from prose.
+"Who attended meetings with frank-founder?" requires two graph hops: person → meetings
+they attended → other attendees. Single-pass grep can't chain (the answers aren't on
+frank's page; they're on the meeting pages frank shows up in).
+
+| Question                                 | Expected | A: found / returned | C: found / returned |
+|------------------------------------------|----------|---------------------|---------------------|
+| Who attended meetings with frank-founder | 3        | 0 / 1               | **3 / 3**           |
+| Who attended meetings with grace-founder | 5        | 0 / 1               | **5 / 5**           |
+| Who attended meetings with alice-partner | 2        | 0 / 0               | **2 / 2**           |
+
+**A: 0/10 expected found. C: 10/10 found.** Multi-hop is where A's fallback fails
+outright — not "noisier results", but "doesn't find the answer at all". For a
+real-world example: "who at YC has met with founders of climate companies?" A 2-hop
+question that would take an A-style agent ~50 sequential reads on a real brain. C
+does it in one recursive CTE.
+
+A naive A-style agent COULD chain greps manually (find pages mentioning frank → for
+each page found, extract refs → filter to people). The cost grows exponentially with
+depth, and the agent has to rebuild the traversal logic for every new question. C's
+`traversePaths()` is a built-in primitive.
+
+## Aggregate queries (A vs C)
+
+"Top 4 most-connected people (by inbound `attended` links)."
+
+| Method                                | Top 4 returned                                                                  | Correct? |
+|---------------------------------------|---------------------------------------------------------------------------------|----------|
+| Expected                              | grace-founder, henry-founder, iris-founder, jack-founder                        | —        |
+| A (text-mention count, grep-style)    | grace, henry, iris, jack                                                        | ✓        |
+| C (structured backlinks)              | grace, henry, iris, jack                                                        | ✓        |
+
+On this synthetic data, A and C agree because each entity reference appears once per
+mentioning page (clean markdown links). On a **real** brain — prose-heavy notes,
+multiple mentions per page, false-positive matches in unrelated text — A's count
+diverges:
+
+- **A counts text mentions.** "Frank said hi to Frank" counts as 2.
+- **C counts structured links.** Auto-link dedupes within page → 1 inbound from that
+  page regardless of how many times the slug appears.
+- **A picks up false positives.** Substring matches like `frank-founder` inside
+  `frank-founders-day` would over-count.
+- **C is exact.** Aggregate queries on the structured table (`getBacklinkCounts`) are
+  one query, ~10ms regardless of brain size. A's grep scales linearly with brain size.
+
+This category should diverge sharply on real-world data; the synthetic benchmark just
+demonstrates parity on clean inputs.
+
+## Type-disagreement queries (A vs C)
+
+"Startups with both VC investment AND advisor coverage." Requires intersecting two
+type-filtered inbound link sets.
+
+| Method                                | Returned                                                              | Recall  | Precision |
+|---------------------------------------|-----------------------------------------------------------------------|---------|-----------|
+| Expected                              | startup-0, startup-1, startup-2, startup-3, startup-4 (5 startups)    | —       | —         |
+| A (prose pattern scan)                | startup-0, startup-1, startup-2, startup-3, startup-4, **5, 6, 7**    | 100.0%  | **62.5%** |
+| C (`getBacklinks` + set intersection) | startup-0, startup-1, startup-2, startup-3, startup-4                 | 100.0%  | **100.0%**|
+
+**A over-recalls by 60%.** Without `inferLinkType`, A scans for prose patterns like
+"invested in <slug>" and "advises <slug>" and intersects. The matches drift because
+"invested" and "advises" appear in unrelated contexts (a partner's page mentions
+"VCs invested in many companies" near a slug; an engineer's page mentions advisors
+elsewhere). C does two filtered `getLinks` calls — each link is already typed at
+extraction time — and intersects exactly. Same recall, much cleaner precision.
+
+## Search ranking with backlink boost
+
+Keyword query that matches a tied cluster of pages. Compare average rank (lower =
+better) of well-connected vs unconnected entities, before and after applying the
+backlink boost (`score *= 1 + 0.05 * log(1 + backlink_count)`).
+
+Query: `"company"` (matches all 10 founder pages identically — same template text).
+
+| Group                                 | Avg rank without boost | Avg rank with boost | Δ            |
+|---------------------------------------|------------------------|---------------------|--------------|
+| Well-connected (4 inbound links each) | 3.5                    | **2.5**             | +1.0 ↑ better |
+| Unconnected (0 inbound links each)    | 8.5                    | 8.5                 | +0.0         |
+
+In a tied keyword-match cluster, the backlink boost moves well-connected pages up by
+~1 rank position on average. Unconnected pages stay where they are. This is the
+intended behavior — a small score multiplier (+5% × log(1+n)) that nudges
+better-evidenced entities higher without distorting ranking when the keyword signal
+is strong.
+
+The synthetic dataset is deliberately constructed so all 10 founder pages have
+identical text (same template). This isolates the boost effect from the keyword
+score. On a real brain, the boost rides on top of vector + keyword scores from
+`hybrid.ts` and the impact compounds with relevance.
+
+## What this benchmark does NOT test (yet)
+
+- **Combined search-quality + graph benchmark.** The existing
+  [search-quality benchmark](2026-04-14-search-quality.md) measures nDCG@k for
+  hybrid search. Future work could merge that benchmark with this one to show A/B/C
+  deltas across the full search stack.
+- **Real-brain performance.** Aggregate queries, in particular, should diverge much
+  more sharply on a 30K-page brain than on this 80-page synthetic dataset — A's
+  text-mention noise compounds at scale.
 
 ## What shipped in PR #188
 

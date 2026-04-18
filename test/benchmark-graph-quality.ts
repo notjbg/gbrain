@@ -312,6 +312,80 @@ interface Metrics {
   total_pages: number;
 }
 
+// ─── Multi-hop / aggregate / type-disagreement / ranking benches ──────
+
+interface MultiHopQuery {
+  question: string;
+  seed: string;
+  expected: string[];
+  /** Link type the multi-hop traversal should follow at every edge. */
+  linkType: string;
+}
+
+const MULTI_HOP_QUERIES: MultiHopQuery[] = [
+  {
+    question: 'Who attended meetings with frank-founder?',
+    seed: 'people/frank-founder',
+    // Frank attended demo-day-0 (alice, grace), oneonone-0 (alice), board-0 (uma).
+    expected: ['people/alice-partner', 'people/grace-founder', 'people/uma-advisor'],
+    linkType: 'attended',
+  },
+  {
+    question: 'Who attended meetings with grace-founder?',
+    seed: 'people/grace-founder',
+    // Grace attended demo-day-0 (alice, frank), demo-day-1 (bob, henry),
+    // oneonone-1 (bob), board-1 (victor).
+    expected: ['people/alice-partner', 'people/frank-founder', 'people/bob-partner', 'people/henry-founder', 'people/victor-advisor'],
+    linkType: 'attended',
+  },
+  {
+    question: 'Who attended meetings with alice-partner?',
+    seed: 'people/alice-partner',
+    // Alice attended demo-day-0 (frank, grace), oneonone-0 (frank).
+    expected: ['people/frank-founder', 'people/grace-founder'],
+    linkType: 'attended',
+  },
+];
+
+interface AggregateQuery {
+  question: string;
+  /** Return top-N most-connected slugs of this kind. */
+  kind: 'people' | 'companies';
+  topN: number;
+  /** Ground truth: top-N slugs in any order. */
+  expected: string[];
+}
+
+const AGGREGATE_QUERIES: AggregateQuery[] = [
+  {
+    question: 'Top 4 most-connected people (by inbound attended links)',
+    kind: 'people',
+    topN: 4,
+    // founders[1..4] = grace, henry, iris, jack each appear as attendees in
+    // 4 meetings (current demo + previous demo + oneonone + board).
+    expected: ['people/grace-founder', 'people/henry-founder', 'people/iris-founder', 'people/jack-founder'],
+  },
+];
+
+interface TypeDisagreementQuery {
+  question: string;
+  expected: string[];
+  /** Two link types whose inbound sets must intersect on a target entity. */
+  typeA: string;
+  typeB: string;
+}
+
+const TYPE_DISAGREEMENT_QUERIES: TypeDisagreementQuery[] = [
+  {
+    question: 'Startups with both VC investment AND advisor coverage',
+    // vc-i invests in startup-i and startup-(i+5); uma/victor/wendy/xavier/yara each advise 2.
+    // startup-0..4 each have at least one investor AND at least one advisor.
+    expected: ['companies/startup-0', 'companies/startup-1', 'companies/startup-2', 'companies/startup-3', 'companies/startup-4'],
+    typeA: 'invested_in',
+    typeB: 'advises',
+  },
+];
+
 // ─── Baseline (no graph) measurement ────────────────────────────
 
 interface BaselineResult {
@@ -393,6 +467,314 @@ async function measureBaselineRelational(
     relational_recall: totalExpected > 0 ? totalFound / totalExpected : 1,
     relational_precision: totalReturned > 0 ? totalValid / totalReturned : 1,
     per_query: perQuery,
+  };
+}
+
+// ─── Multi-hop / aggregate / type-disagreement measurement ──────────
+
+interface CategoryResult {
+  recall: number;
+  precision: number;
+  per_query: Array<{ question: string; expected: number; a_found: number; a_returned: number; c_found: number; c_returned: number }>;
+}
+
+/**
+ * Multi-hop: "who attended meetings with X?" requires 2 hops (person -> meeting -> person).
+ *
+ * - Configuration A fallback: a naive agent could in principle do this with two
+ *   sequential greps (find pages mentioning X, then find pages they reference),
+ *   but the cost grows exponentially with depth and the result is mixed with
+ *   unrelated refs. Our fallback simulates a SINGLE-pass grep — the realistic
+ *   minimum effort an agent makes before giving up — which returns nothing
+ *   useful for multi-hop (no chained refs). This models the agent that doesn't
+ *   commit to multi-step grep reasoning.
+ * - Configuration C: traversePaths(seed, depth=2, direction='both', linkType=...)
+ *   returns the answer in one query. Filter out the seed itself from results.
+ */
+async function measureMultiHop(
+  engine: PGLiteEngine,
+  seeds: SeededPage[],
+): Promise<CategoryResult> {
+  const contentBySlug = new Map<string, string>();
+  for (const s of seeds) contentBySlug.set(s.slug, `${s.page.compiled_truth}\n${s.page.timeline ?? ''}`);
+
+  const perQuery = [];
+  let totalExpected = 0, totalAFound = 0, totalCFound = 0, totalAReturned = 0, totalCReturned = 0;
+  let totalAValid = 0, totalCValid = 0;
+
+  for (const q of MULTI_HOP_QUERIES) {
+    // A: single-pass fallback — read seed page, extract refs, return them.
+    // (Multi-hop refs aren't on the seed page, so this returns nothing useful.)
+    const seedContent = contentBySlug.get(q.seed) ?? '';
+    const aReturned = new Set<string>();
+    const ENTITY_REF_RE = /\[[^\]]+\]\(([^)]+)\)|\b((?:people|companies|meetings|concepts)\/[a-z0-9-]+)\b/gi;
+    for (const m of seedContent.matchAll(ENTITY_REF_RE)) {
+      const ref = (m[1] ?? m[2] ?? '').replace(/\.md$/, '').replace(/^\.\.\//, '');
+      if (ref && ref.includes('/') && ref !== q.seed) aReturned.add(ref);
+    }
+
+    // C: graph traversal, depth=2, both directions, filtered by link type.
+    const paths = await engine.traversePaths(q.seed, { depth: 2, direction: 'both', linkType: q.linkType });
+    const cReturned = new Set<string>();
+    for (const p of paths) {
+      // Add both endpoints, skip the seed itself.
+      if (p.from_slug !== q.seed) cReturned.add(p.from_slug);
+      if (p.to_slug !== q.seed) cReturned.add(p.to_slug);
+    }
+    // Filter to people only (the question asks about people).
+    for (const r of [...cReturned]) {
+      if (!r.startsWith('people/')) cReturned.delete(r);
+    }
+
+    const expected = new Set(q.expected);
+    let aFound = 0, cFound = 0, aValid = 0, cValid = 0;
+    for (const e of expected) {
+      totalExpected++;
+      if (aReturned.has(e)) { aFound++; totalAFound++; }
+      if (cReturned.has(e)) { cFound++; totalCFound++; }
+    }
+    for (const r of aReturned) { totalAReturned++; if (expected.has(r)) { aValid++; totalAValid++; } }
+    for (const r of cReturned) { totalCReturned++; if (expected.has(r)) { cValid++; totalCValid++; } }
+
+    perQuery.push({ question: q.question, expected: expected.size, a_found: aFound, a_returned: aReturned.size, c_found: cFound, c_returned: cReturned.size });
+  }
+
+  return {
+    recall: totalExpected > 0 ? totalCFound / totalExpected : 1,
+    precision: totalCReturned > 0 ? totalCValid / totalCReturned : 1,
+    per_query: perQuery,
+  };
+}
+
+interface AggregateResult {
+  c_correct: boolean;
+  a_correct: boolean;
+  c_top: string[];
+  a_top: string[];
+  expected: string[];
+  question: string;
+}
+
+/**
+ * Aggregate: "top N most-connected people" requires counting inbound links per
+ * entity and sorting.
+ *
+ * - C: engine.getBacklinkCounts() — one query, exact counts.
+ * - A: scan all pages, count substring mentions of each candidate slug. This is
+ *   what `grep -c slug brain/` would give. Counts text mentions, not structured
+ *   relationships, so it's noisier (a slug might be mentioned in passing without
+ *   forming a real relationship).
+ */
+async function measureAggregate(
+  engine: PGLiteEngine,
+  seeds: SeededPage[],
+): Promise<AggregateResult[]> {
+  const contentBySlug = new Map<string, string>();
+  for (const s of seeds) contentBySlug.set(s.slug, `${s.page.compiled_truth}\n${s.page.timeline ?? ''}`);
+
+  const results: AggregateResult[] = [];
+  for (const q of AGGREGATE_QUERIES) {
+    const candidates = seeds.filter(s => s.slug.startsWith(`${q.kind}/`)).map(s => s.slug);
+
+    // C: structured backlink counts.
+    const counts = await engine.getBacklinkCounts(candidates);
+    const cTop = candidates
+      .map(s => ({ slug: s, n: counts.get(s) ?? 0 }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, q.topN)
+      .map(x => x.slug);
+
+    // A: text-mention counts across all pages.
+    const aCounts = new Map<string, number>();
+    for (const c of candidates) {
+      let n = 0;
+      for (const [slug, content] of contentBySlug) {
+        if (slug === c) continue;
+        // Count occurrences of the candidate slug in content text.
+        const matches = content.match(new RegExp(c.replace(/[/-]/g, '\\$&'), 'g'));
+        n += matches?.length ?? 0;
+      }
+      aCounts.set(c, n);
+    }
+    const aTop = candidates
+      .map(s => ({ slug: s, n: aCounts.get(s) ?? 0 }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, q.topN)
+      .map(x => x.slug);
+
+    const expectedSet = new Set(q.expected);
+    const cMatchCount = cTop.filter(s => expectedSet.has(s)).length;
+    const aMatchCount = aTop.filter(s => expectedSet.has(s)).length;
+
+    results.push({
+      question: q.question,
+      expected: q.expected,
+      c_top: cTop,
+      a_top: aTop,
+      c_correct: cMatchCount === q.topN,
+      a_correct: aMatchCount === q.topN,
+    });
+  }
+  return results;
+}
+
+interface TypeDisagreementResult {
+  question: string;
+  expected: string[];
+  c_returned: string[];
+  a_returned: string[];
+  c_recall: number;
+  c_precision: number;
+  a_recall: number;
+  a_precision: number;
+}
+
+/**
+ * Type-disagreement: "startups with both VC investment AND advisor" requires
+ * intersecting two type-filtered inbound sets.
+ *
+ * - C: two getLinks calls (one per type) + set intersection. Direct, exact.
+ * - A: two text searches — for "invested in <slug>" patterns and "advises <slug>"
+ *   patterns. Without inferLinkType, the agent has to grep prose. The fallback
+ *   below grep-counts each pattern's typical phrasing, then intersects. This
+ *   over-matches because "advises" or "invested in" can appear in unrelated text.
+ */
+async function measureTypeDisagreement(
+  engine: PGLiteEngine,
+  seeds: SeededPage[],
+): Promise<TypeDisagreementResult[]> {
+  const contentBySlug = new Map<string, string>();
+  for (const s of seeds) contentBySlug.set(s.slug, `${s.page.compiled_truth}\n${s.page.timeline ?? ''}`);
+
+  const results: TypeDisagreementResult[] = [];
+  for (const q of TYPE_DISAGREEMENT_QUERIES) {
+    // C: structured intersection.
+    const startups = seeds.filter(s => s.slug.startsWith('companies/startup-')).map(s => s.slug);
+    const cReturned: string[] = [];
+    for (const s of startups) {
+      const inbound = await engine.getBacklinks(s);
+      const hasA = inbound.some(b => b.link_type === q.typeA);
+      const hasB = inbound.some(b => b.link_type === q.typeB);
+      if (hasA && hasB) cReturned.push(s);
+    }
+
+    // A: scan content for prose patterns. Detect "invested in <slug>" / "advises <slug>"
+    // by looking for the slug appearing on a page that ALSO has the relevant verb nearby.
+    const aReturned: string[] = [];
+    for (const s of startups) {
+      let mentionedAsInvestment = false, mentionedAsAdvise = false;
+      for (const [, content] of contentBySlug) {
+        // Is this page's content mentioning the slug near an investment-verb / advise-verb?
+        const idx = content.indexOf(s);
+        if (idx === -1) continue;
+        // Take a 60-char window before the slug mention.
+        const window = content.slice(Math.max(0, idx - 60), idx).toLowerCase();
+        if (q.typeA === 'invested_in' && /invest|backed|funding/.test(window)) mentionedAsInvestment = true;
+        if (q.typeB === 'advises' && /advis|board/.test(window)) mentionedAsAdvise = true;
+      }
+      if (mentionedAsInvestment && mentionedAsAdvise) aReturned.push(s);
+    }
+
+    const expectedSet = new Set(q.expected);
+    const cValid = cReturned.filter(s => expectedSet.has(s)).length;
+    const aValid = aReturned.filter(s => expectedSet.has(s)).length;
+
+    results.push({
+      question: q.question,
+      expected: q.expected,
+      c_returned: cReturned,
+      a_returned: aReturned,
+      c_recall: q.expected.length > 0 ? cValid / q.expected.length : 1,
+      c_precision: cReturned.length > 0 ? cValid / cReturned.length : 1,
+      a_recall: q.expected.length > 0 ? aValid / q.expected.length : 1,
+      a_precision: aReturned.length > 0 ? aValid / aReturned.length : 1,
+    });
+  }
+  return results;
+}
+
+interface RankingResult {
+  question: string;
+  well_connected: string[];
+  unconnected: string[];
+  /** Average rank (1 = best) of well-connected pages without boost. */
+  avg_rank_well_without: number;
+  /** Average rank of well-connected pages with backlink boost. */
+  avg_rank_well_with: number;
+  /** Average rank of unconnected pages without boost. */
+  avg_rank_unconnected_without: number;
+  /** Average rank of unconnected pages with backlink boost. */
+  avg_rank_unconnected_with: number;
+}
+
+/**
+ * Search ranking: keyword search for a generic term that matches many pages.
+ * Compare rank position of well-connected entities (with many inbound links)
+ * before and after applying the backlink boost.
+ *
+ * - Without boost: ranks by keyword match score only.
+ * - With boost: score *= (1 + 0.05 * log(1 + backlink_count)). Well-connected
+ *   pages move up the ranking.
+ */
+async function measureRanking(
+  engine: PGLiteEngine,
+  seeds: SeededPage[],
+): Promise<RankingResult> {
+  // searchKeyword joins content_chunks (a normal `gbrain import` populates
+  // these). The benchmark seeded via putPage() which skips chunking, so we
+  // upsert one chunk per page now to make ranking measurable.
+  for (const s of seeds) {
+    const text = `${s.page.title}\n${s.page.compiled_truth}`;
+    await engine.upsertChunks(s.slug, [
+      { chunk_index: 0, chunk_text: text, chunk_source: 'compiled_truth' },
+    ]);
+  }
+
+  // Query "company" matches all 10 founder pages identically (each says "X is the
+  // CEO of [Y]. They founded the company."). The text is uniform so ts_rank gives
+  // identical scores — a tied cluster.
+  // Compare:
+  //   Well-connected: grace, henry, iris, jack — each has 4 inbound `attended` links
+  //                   (1 demo + 1 prev demo + 1 oneonone + 1 board)
+  //   Unconnected:    liam, mia, noah, olivia — all 4 have 0 inbound links
+  // Without boost both groups are tied (PG tie-breaking is unstable).
+  // With boost the well-connected ones rise to the top of the cluster.
+  const query = 'company';
+  const wellConnected = ['people/grace-founder', 'people/henry-founder', 'people/iris-founder', 'people/jack-founder'];
+  const unconnected = ['people/liam-founder', 'people/mia-founder', 'people/noah-founder', 'people/olivia-founder'];
+
+  const results = await engine.searchKeyword(query, { limit: 80 });
+
+  // Page-level dedup: searchKeyword returns chunks; collapse to first chunk per slug.
+  const seenWithout = new Set<string>();
+  const sortedWithout = [...results]
+    .sort((a, b) => b.score - a.score)
+    .filter(r => { if (seenWithout.has(r.slug)) return false; seenWithout.add(r.slug); return true; });
+
+  const allSlugs = sortedWithout.map(r => r.slug);
+  const counts = await engine.getBacklinkCounts(allSlugs);
+  const boosted = sortedWithout.map(r => ({
+    ...r,
+    score: r.score * (1 + 0.05 * Math.log(1 + (counts.get(r.slug) ?? 0))),
+  }));
+  // boosted is already deduped (sortedWithout was). Just re-sort by new score.
+  const sortedWith = [...boosted].sort((a, b) => b.score - a.score);
+
+  const rankOf = (sorted: typeof sortedWithout, slug: string): number => {
+    const idx = sorted.findIndex(r => r.slug === slug);
+    return idx === -1 ? sorted.length + 1 : idx + 1;
+  };
+
+  const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+  return {
+    question: `Keyword search for "${query}" — average rank of well-connected vs unconnected pages, before and after backlink boost`,
+    well_connected: wellConnected,
+    unconnected,
+    avg_rank_well_without: avg(wellConnected.map(s => rankOf(sortedWithout, s))),
+    avg_rank_well_with: avg(wellConnected.map(s => rankOf(sortedWith, s))),
+    avg_rank_unconnected_without: avg(unconnected.map(s => rankOf(sortedWithout, s))),
+    avg_rank_unconnected_with: avg(unconnected.map(s => rankOf(sortedWith, s))),
   };
 }
 
@@ -563,6 +945,13 @@ async function main() {
   // This is the honest "what does the brain do without our PR" baseline.
   const baseline = await measureBaselineRelational(seeds, queries);
 
+  // ── Multi-hop, aggregate, type-disagreement, ranking ──
+  // These run against the populated graph (engine already has links + timeline).
+  const multiHop = await measureMultiHop(engine, seeds);
+  const aggregates = await measureAggregate(engine, seeds);
+  const typeDisagreement = await measureTypeDisagreement(engine, seeds);
+  const ranking = await measureRanking(engine, seeds);
+
   await engine.disconnect();
 
   const m: Metrics = {
@@ -580,7 +969,7 @@ async function main() {
   // ── Output ──
 
   if (json) {
-    process.stdout.write(JSON.stringify({ ...m, baseline }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ ...m, baseline, multiHop, aggregates, typeDisagreement, ranking }, null, 2) + '\n');
   } else {
     log('## Metrics');
     log('| Metric                | Value | Target | Pass |');
@@ -632,6 +1021,57 @@ async function main() {
       const c = cPerQuery[i];
       log(`| ${q.question.slice(0, 40).padEnd(40)} | ${String(b.expected).padEnd(8)} | ${String(`${b.found} / ${b.returned}`).padEnd(19)} | ${String(`${c.found} / ${c.returned}`).padEnd(19)} |`);
     }
+    log('');
+
+    // ── Multi-hop ──
+    log('## Multi-hop traversal (depth 2)');
+    log('Single-pass naive grep can\'t chain. C does it in one recursive CTE.');
+    log('');
+    log('| Question                                 | Expected | A: found / returned | C: found / returned |');
+    log('|------------------------------------------|----------|---------------------|---------------------|');
+    for (const r of multiHop.per_query) {
+      log(`| ${r.question.slice(0, 40).padEnd(40)} | ${String(r.expected).padEnd(8)} | ${String(`${r.a_found} / ${r.a_returned}`).padEnd(19)} | ${String(`${r.c_found} / ${r.c_returned}`).padEnd(19)} |`);
+    }
+    log(`Multi-hop recall: A vs C — ${multiHop.per_query.reduce((s, r) => s + r.a_found, 0)} vs ${multiHop.per_query.reduce((s, r) => s + r.c_found, 0)} of ${multiHop.per_query.reduce((s, r) => s + r.expected, 0)} expected. C aggregate: recall ${pct(multiHop.recall)}, precision ${pct(multiHop.precision)}.`);
+    log('');
+
+    // ── Aggregate ──
+    log('## Aggregate queries');
+    log('"Top N most-connected" — A counts text mentions, C counts dedupe\'d structured links.');
+    log('');
+    for (const r of aggregates) {
+      log(`**${r.question}**`);
+      log(`- Expected (any order): ${r.expected.map(s => '`' + s + '`').join(', ')}`);
+      log(`- A (text-mention count): ${r.a_top.map(s => '`' + s + '`').join(', ')} → ${r.a_correct ? '✓ matches' : '✗ wrong set'}`);
+      log(`- C (structured backlinks): ${r.c_top.map(s => '`' + s + '`').join(', ')} → ${r.c_correct ? '✓ matches' : '✗ wrong set'}`);
+      log('');
+    }
+
+    // ── Type-disagreement ──
+    log('## Type-disagreement queries (set intersection on inbound link types)');
+    log('A must scan prose for verb patterns; C does two filtered getLinks + intersect.');
+    log('');
+    for (const r of typeDisagreement) {
+      log(`**${r.question}**`);
+      log(`- Expected: ${r.expected.length} startups (${r.expected.map(s => s.replace('companies/', '')).join(', ')})`);
+      log(`- A: ${r.a_returned.length} returned (${r.a_returned.map(s => s.replace('companies/', '')).join(', ') || 'none'}). Recall ${pct(r.a_recall)}, precision ${pct(r.a_precision)}.`);
+      log(`- C: ${r.c_returned.length} returned (${r.c_returned.map(s => s.replace('companies/', '')).join(', ') || 'none'}). Recall ${pct(r.c_recall)}, precision ${pct(r.c_precision)}.`);
+      log('');
+    }
+
+    // ── Ranking ──
+    log('## Search ranking with backlink boost');
+    log('Keyword query that matches both well-connected and unconnected pages. Compare');
+    log('average rank (lower = better) of each group before vs after applying the backlink');
+    log('boost (`score *= 1 + 0.05 * log(1 + n)`).');
+    log('');
+    log(`**${ranking.question}**`);
+    log('| Group                                    | Avg rank without boost | Avg rank with boost | Δ |');
+    log('|------------------------------------------|------------------------|---------------------|---|');
+    const wDelta = ranking.avg_rank_well_without - ranking.avg_rank_well_with;
+    const uDelta = ranking.avg_rank_unconnected_without - ranking.avg_rank_unconnected_with;
+    log(`| Well-connected (4 inbound links each)    | ${ranking.avg_rank_well_without.toFixed(1).padEnd(22)} | ${ranking.avg_rank_well_with.toFixed(1).padEnd(19)} | ${wDelta >= 0 ? '+' : ''}${wDelta.toFixed(1)} ${wDelta > 0 ? '↑ better' : wDelta < 0 ? '↓ worse' : ''} |`);
+    log(`| Unconnected (0 inbound links each)       | ${ranking.avg_rank_unconnected_without.toFixed(1).padEnd(22)} | ${ranking.avg_rank_unconnected_with.toFixed(1).padEnd(19)} | ${uDelta >= 0 ? '+' : ''}${uDelta.toFixed(1)} ${uDelta > 0 ? '↑ better' : uDelta < 0 ? '↓ worse' : ''} |`);
     log('');
   }
 
